@@ -1,0 +1,49 @@
+# Exact versions of the environment these experiments are run in.
+#
+# The paper's results were produced under Python 3.10.0 with the
+# numerical versions pinned below (matplotlib was 3.10.8), as
+# results/simulation/package_versions.json records; that file is rewritten by
+# every run, so it always names the stack behind the artifacts beside it.
+#
+# For creating an environment, prefer env.yml.  This file pins patch versions
+# so a rerun can be reproduced bit for bit; env.yml pins minor versions so it
+# resolves somewhere other than this machine.
+#
+# These versions are the `rcb` conda environment this suite is run in, and
+# under them `python -m pytest code/tests` passes with no failures and no
+# skips.
+#
+# One condition for bit-exact reproduction cannot be written as a version pin,
+# and it is not a dependency: the BLAS/LAPACK numpy and scipy are linked
+# against.  These baselines were recorded on osx-arm64 against Apple
+# Accelerate.  `test_equivalence.py` asserts EXACT equality against 243
+# recorded outputs, and a different backend -- conda-forge's reference build,
+# OpenBLAS, MKL -- orders its floating-point reductions differently, so `eigh`
+# and matrix products disagree in the last bits, moving roughly a third to a
+# half of the recorded values in each of s5, s6 and s7 -- the exact count
+# varies with the build -- starting at `design_eigendecomposition` and
+# `draw_replication`, with every version below already correct.  Measured on
+# conda-forge's netlib build: those three parametrizations fail and the other
+# 62 tests pass.  On osx-arm64 the backend is requested with
+#
+#     conda install -n rcb -c conda-forge "libblas=*=*accelerate"
+#
+# `env.yml` names no BLAS, so it still resolves on Linux and Windows; there,
+# expect `test_equivalence` to fail and everything else to pass.  Nothing else
+# in the repository depends on the backend, and the differences are far below
+# the manuscript's displayed precision -- this is a limit of reproducing bytes
+# across platforms, not a correctness condition on the method.
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+matplotlib==3.10.9
+seaborn==0.13.2
+scikit-learn==1.7.2
+joblib==1.5.3
+anndata==0.11.4
+h5py==3.16.0
+crispyx==0.1.1
+
+# For running the notebooks and the test suite.
+jupyter
+pytest
