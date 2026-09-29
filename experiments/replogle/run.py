@@ -29,6 +29,8 @@ TABLES = (
     "full_k562_rcb_analysis.csv",
     "full_k562_gene_specificity.csv",
     "full_k562_perturbation_summary.csv",
+    "full_k562_adjustment_path.csv",
+    "full_k562_covariate_shift.csv",
 )
 
 
@@ -124,6 +126,7 @@ def reproduce(config, *, smoke=False):
         full_columns = [
             "rcb_effect",
             "rcb_counterfactual_mean",
+            "raw_effect",
             "rcb_estimated_risk",
             "rcb_effect_pi_low",
             "rcb_effect_pi_high",

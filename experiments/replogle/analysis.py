@@ -349,7 +349,9 @@ class Analysis:
             float(np.asarray(sigma2).reshape(-1)[0]),
         )
 
-    def fit_rcb_on_base(self, X0, y0, Xt_eval, gamma, geometry, r2, sigma2):
+    def fit_rcb_on_base(
+        self, X0, y0, Xt_eval, gamma, geometry, r2, sigma2, *, return_path=False
+    ):
         gamma = np.asarray(gamma, float).reshape(-1)
         total = float(gamma.sum())
         if (
@@ -375,13 +377,24 @@ class Analysis:
             geometry=geometry,
             variance_components=(r2, sigma2),
         )
-        return {
+        out = {
             "mu": float(fit.muhat0),
             "gamma": np.asarray(fit.weights),
             "penalty": float(fit.selected_lambda),
             "risk": float(fit.risk_path[fit.selected_index]),
             "no_adjustment": bool(fit.selected_no_adjustment_endpoint),
         }
+        if return_path:
+            # Whole penalty path, for the full-data adjustment diagnostics; the
+            # last point is the no-augmentation endpoint.
+            out["path"] = {
+                "penalty": np.asarray(fit.penalty_grid, float),
+                "counterfactual_mean": np.asarray(fit.estimate_path, float),
+                "risk": np.asarray(fit.risk_path, float),
+                "qhat": np.asarray(fit.qhat_path, float),
+                "ess": 1.0 / np.asarray(fit.norm_squared_path, float),
+            }
+        return out
 
     def prepare_design(self, X0, X1_pilot):
         """Cache outcome-independent work for genes sharing this exact design."""
@@ -452,6 +465,23 @@ class Analysis:
             }
         )
         return fits
+
+    @staticmethod
+    def balance_diagnostics(fits, X0, X1_pilot, X_population):
+        """Imbalance of each weight vector against the pilot-fold mean (the
+        in-sample balancing target of the base weights) and against the mean of
+        all perturbed profiles (a population reference), for diagnosing
+        whether balancing on a small pilot fold carries over to the target."""
+        out = {}
+        for key, fit in fits.items():
+            balanced = X0.T @ np.asarray(fit["gamma"], float)
+            out[f"pilot_imbalance_{key}"] = float(
+                np.linalg.norm(X1_pilot.mean(0) - balanced)
+            )
+            out[f"population_imbalance_{key}"] = float(
+                np.linalg.norm(X_population.mean(0) - balanced)
+            )
+        return out
 
     def fit_metadata(self, fits, X0, Xt, prefix=""):
         out = {}
@@ -673,6 +703,9 @@ class Analysis:
                         }
                     )
                     row.update(self.fit_metadata(fits, X0, X1_eval))
+                    row.update(
+                        self.balance_diagnostics(fits, X0, X1_pilot, self.k562_x[p])
+                    )
                     rows.append(row)
                 except Exception as exc:
                     raise RuntimeError(
@@ -973,16 +1006,52 @@ class Analysis:
             )
             for h in self.full_panel_genes
         }
-        full_rows = []
+        full_rows, path_rows, shift_rows = [], [], []
         for p in self.selected_p:
             Xt = self.k562_x[p]
+            # Uniform-weight covariate shift of the standardized features.
+            shift = Xt.mean(0) - X0.mean(0)
+            shift_rows += [
+                {"perturbation_p": p, "feature": g, "mean_shift": float(d)}
+                for g, d in zip(self.feature_genes, shift)
+            ]
             for h in self.full_panel_genes:
                 j, jd = (self.outcome_col[h], self.de_gene_col[h])
                 y0, y1 = (self.k562_y[CONTROL][:, j], self.k562_y[p][:, j])
                 try:
                     fit = self.fit_rcb_on_base(
-                        X0, y0, Xt, uniform_gamma, full_geometry, *full_nuisance[h]
+                        X0,
+                        y0,
+                        Xt,
+                        uniform_gamma,
+                        full_geometry,
+                        *full_nuisance[h],
+                        return_path=True,
                     )
+                    path = fit["path"]
+                    # Adjustment = RCB contrast minus unadjusted contrast
+                    # = raw control mean minus RCB counterfactual mean.
+                    path_rows += [
+                        {
+                            "perturbation_p": p,
+                            "outcome_h": h,
+                            "penalty": lam,
+                            "rcb_adjustment": float(y0.mean() - mu),
+                            "estimated_risk": risk_value,
+                            "qhat": qhat,
+                            "ess": ess,
+                            "selected": bool(k == int(np.argmin(path["risk"]))),
+                        }
+                        for k, (lam, mu, risk_value, qhat, ess) in enumerate(
+                            zip(
+                                path["penalty"],
+                                path["counterfactual_mean"],
+                                path["risk"],
+                                path["qhat"],
+                                path["ess"],
+                            )
+                        )
+                    ]
                     pred_sd = np.sqrt(max(fit["risk"], 0.0))
                     mu_lo, mu_hi = (
                         fit["mu"] - PREDICTION_Z * pred_sd,
@@ -1002,6 +1071,8 @@ class Analysis:
                             "n_perturbed": len(Xt),
                             "observed_perturbed_mean": float(y1.mean()),
                             "rcb_counterfactual_mean": fit["mu"],
+                            "raw_control_mean": float(y0.mean()),
+                            "raw_effect": float(y1.mean() - y0.mean()),
                             "rcb_effect": effect,
                             "rcb_counterfactual_pi_low": mu_lo,
                             "rcb_counterfactual_pi_high": mu_hi,
@@ -1014,6 +1085,9 @@ class Analysis:
                             "rcb_estimated_risk": fit["risk"],
                             "rcb_no_adjustment": fit["no_adjustment"],
                             "rcb_ess": float(1 / np.sum(gamma**2)),
+                            "rcb_r2": full_nuisance[h][0],
+                            "rcb_sigma2": full_nuisance[h][1],
+                            "rcb_qhat_endpoint": float(path["qhat"][-1]),
                             "rcb_imbalance": float(
                                 np.linalg.norm(Xt.mean(0) - X0.T @ gamma)
                             ),
@@ -1031,6 +1105,12 @@ class Analysis:
                         f"Full K562 RCB failed: ({p}, {h}): {type(exc).__name__}: {exc}"
                     ) from exc
         self.full_rcb_table = pd.DataFrame(full_rows)
+        pd.DataFrame(path_rows).to_csv(
+            self.output / "full_k562_adjustment_path.csv", index=False
+        )
+        pd.DataFrame(shift_rows).to_csv(
+            self.output / "full_k562_covariate_shift.csv", index=False
+        )
         self.full_rcb_table.to_csv(
             self.output / "full_k562_rcb_analysis.csv", index=False
         )
